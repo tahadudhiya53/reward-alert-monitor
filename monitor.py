@@ -12,32 +12,27 @@ import requests
 # CONFIGURATION
 # ============================================================
 
-DEFAULT_P2E_URL = "https://playtoearn.com/earn"
-DEFAULT_STATE_FILE = "reward_state.json"
-
 P2E_URL = os.environ.get(
     "P2E_URL",
-    DEFAULT_P2E_URL,
+    "https://playtoearn.com/earn",
 ).strip()
 
-TARGET_AMOUNTS = [
-    x.strip().lower()
-    for x in os.environ.get(
-        "TARGET_AMOUNTS",
-        "$2,$5,$10",
-    ).split(",")
-    if x.strip()
-]
+# Always monitor these three Solana rewards.
+TARGET_AMOUNTS = {
+    "$2",
+    "$5",
+    "$10",
+}
 
-try:
-    FREE_STOCK_TOTAL = int(
-        os.environ.get(
-            "FREE_STOCK_TOTAL",
-            "25",
-        )
+# The FREE $2 reward is specifically the 25-total pool.
+FREE_STOCK_TOTAL = 25
+
+STATE_FILE = Path(
+    os.environ.get(
+        "STATE_FILE",
+        "reward_state.json",
     )
-except ValueError:
-    FREE_STOCK_TOTAL = 25
+)
 
 BOT_TOKEN = os.environ.get(
     "TELEGRAM_BOT_TOKEN",
@@ -49,28 +44,20 @@ CHAT_ID = os.environ.get(
     "",
 ).strip()
 
-STATE_FILE = Path(
-    os.environ.get(
-        "STATE_FILE",
-        DEFAULT_STATE_FILE,
-    )
-)
-
 
 # ============================================================
 # TELEGRAM
 # ============================================================
 
-def telegram(message: str) -> bool:
-    """
-    Send a Telegram message.
+def send_telegram(message: str) -> bool:
+    """Send a Telegram message."""
 
-    TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID
-    must be provided through environment variables.
-    """
+    if not BOT_TOKEN:
+        print("ERROR: TELEGRAM_BOT_TOKEN is missing.")
+        return False
 
-    if not BOT_TOKEN or not CHAT_ID:
-        print("Telegram is not configured.")
+    if not CHAT_ID:
+        print("ERROR: TELEGRAM_CHAT_ID is missing.")
         return False
 
     url = (
@@ -103,90 +90,27 @@ def telegram(message: str) -> bool:
 
 
 # ============================================================
-# STATE
+# NORMALIZATION
 # ============================================================
 
-def load_state() -> dict[str, bool]:
+def normalize_amount(amount: str) -> str:
     """
-    Load previous availability state.
+    Convert reward amount into a standard form.
 
-    Example:
-
-    {
-        "$2-free-25": true,
-        "$5-10": false,
-        "$10-5": true
-    }
-    """
-
-    if not STATE_FILE.exists():
-        return {}
-
-    try:
-        data = json.loads(
-            STATE_FILE.read_text(
-                encoding="utf-8"
-            )
-        )
-
-        if not isinstance(data, dict):
-            return {}
-
-        result = {}
-
-        for key, value in data.items():
-            result[str(key)] = bool(value)
-
-        return result
-
-    except Exception as exc:
-        print(
-            "Could not load state file: "
-            f"{type(exc).__name__}: {exc}"
-        )
-
-        return {}
-
-
-def save_state(
-    state: dict[str, bool],
-) -> None:
-    """
-    Save availability state.
-    """
-
-    STATE_FILE.write_text(
-        json.dumps(
-            state,
-            indent=2,
-            sort_keys=True,
-        ),
-        encoding="utf-8",
-    )
-
-
-# ============================================================
-# REWARD PARSING
-# ============================================================
-
-def normalize_amount(
-    amount: str,
-) -> str:
-    """
-    Normalize:
+    Examples:
 
         $2
         $2.00
         $ 2
 
-    into:
+    become:
 
         $2
     """
 
     match = re.search(
         r"\$\s*(\d+(?:\.\d+)?)",
-        amount,
+        amount.strip(),
     )
 
     if not match:
@@ -197,44 +121,36 @@ def normalize_amount(
     number = float(match.group(1))
 
     if number.is_integer():
-        return f"${int(number)}".lower()
+        return f"${int(number)}"
 
-    return f"${number}".lower()
+    return f"${number}"
 
 
-def parse_stock(
-    stock: str,
-) -> tuple[int, int]:
+def parse_stock(stock: str) -> tuple[int, int]:
     """
-    Parse:
+    Convert:
 
         3/25
 
     into:
 
-        (3, 25)
+        current = 3
+        total = 25
     """
 
-    stock = stock.strip()
-
     match = re.fullmatch(
-        r"(\d+)\s*/\s*(\d+)",
+        r"\s*(\d+)\s*/\s*(\d+)\s*",
         stock,
     )
 
     if not match:
         raise ValueError(
-            "Stock must use the format CURRENT/TOTAL. "
-            "Example: 3/25"
+            f"Invalid stock format: {stock}. "
+            "Expected CURRENT/TOTAL, e.g. 3/25."
         )
 
     current = int(match.group(1))
     total = int(match.group(2))
-
-    if current < 0:
-        raise ValueError(
-            "Current stock cannot be negative."
-        )
 
     if total <= 0:
         raise ValueError(
@@ -250,7 +166,7 @@ def parse_stock(
 
 
 # ============================================================
-# TARGET FILTERING
+# TARGET REWARD
 # ============================================================
 
 def is_target_reward(
@@ -258,21 +174,18 @@ def is_target_reward(
     total: int,
 ) -> bool:
     """
-    Decide whether a reward should be monitored.
-
     Rules:
 
     $2:
-        Only total=25.
-        This is the FREE $2 pool.
+        Monitor ONLY the free 25-total pool.
 
     $5:
-        Solana $5 pool.
+        Monitor the Solana 10-total pool.
 
     $10:
-        Solana $10 pool.
+        Monitor the Solana 5-total pool.
 
-    Other rewards:
+    Everything else:
         Ignore.
     """
 
@@ -284,23 +197,19 @@ def is_target_reward(
     if amount == "$2":
         return total == FREE_STOCK_TOTAL
 
-    return amount in {
-        "$5",
-        "$10",
-    }
+    if amount == "$5":
+        return total == 10
+
+    if amount == "$10":
+        return total == 5
+
+    return False
 
 
-# ============================================================
-# REWARD OBJECT
-# ============================================================
-
-def create_reward(
+def make_reward(
     amount: str,
     stock: str,
 ) -> dict[str, Any]:
-    """
-    Create a normalized reward object.
-    """
 
     amount = normalize_amount(amount)
 
@@ -323,17 +232,15 @@ def create_reward(
     }
 
 
+# ============================================================
+# REWARD KEY
+# ============================================================
+
 def reward_key(
     reward: dict[str, Any],
 ) -> str:
     """
-    Unique key for each reward pool.
-
-    Examples:
-
-        $2-free-25
-        $5-10
-        $10-5
+    Create a unique key for each reward pool.
     """
 
     amount = reward["amount"]
@@ -349,15 +256,62 @@ def reward_key(
 
 
 # ============================================================
-# TELEGRAM MESSAGE
+# STATE
 # ============================================================
 
-def build_alert_message(
+def load_state() -> dict[str, bool]:
+    """Load previous availability state."""
+
+    if not STATE_FILE.exists():
+        return {}
+
+    try:
+        data = json.loads(
+            STATE_FILE.read_text(
+                encoding="utf-8"
+            )
+        )
+
+        if not isinstance(data, dict):
+            return {}
+
+        return {
+            str(key): bool(value)
+            for key, value in data.items()
+        }
+
+    except Exception as exc:
+
+        print(
+            "Could not read state file: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+        return {}
+
+
+def save_state(
+    state: dict[str, bool],
+) -> None:
+    """Save availability state."""
+
+    STATE_FILE.write_text(
+        json.dumps(
+            state,
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+
+# ============================================================
+# ALERT MESSAGE
+# ============================================================
+
+def alert_message(
     reward: dict[str, Any],
 ) -> str:
-    """
-    Build the refill notification.
-    """
 
     amount = reward["amount"]
     current = reward["current"]
@@ -367,18 +321,15 @@ def build_alert_message(
         amount == "$2"
         and total == FREE_STOCK_TOTAL
     ):
-        reward_name = "$2 Solana FREE reward"
-
+        name = "$2 Solana FREE reward"
     else:
-        reward_name = (
-            f"{amount} Solana reward"
-        )
+        name = f"{amount} Solana reward"
 
     return (
         "🚨 SOLANA REWARD AVAILABLE!\n\n"
-        f"💰 {reward_name}\n"
-        f"📦 {current} / {total} available\n\n"
-        "Open PlayToEarn NOW and redeem manually:\n"
+        f"💰 {name}\n"
+        f"📦 {current}/{total} available\n\n"
+        "Redeem it manually on PlayToEarn:\n"
         f"{P2E_URL}"
     )
 
@@ -390,49 +341,51 @@ def build_alert_message(
 def process_reward(
     reward: dict[str, Any],
     state: dict[str, bool],
-) -> bool:
+) -> None:
     """
-    Process one reward.
-
-    Alert only when:
+    Alert only on:
 
         unavailable → available
 
-    Examples:
+    No duplicate alert while it remains available.
 
-        0/25 → 3/25  = ALERT
-        3/25 → 5/25  = NO ALERT
-        5/25 → 0/25  = RESET
-        0/25 → 4/25  = ALERT AGAIN
+    When it reaches zero:
+
+        available → unavailable
+
+    the state resets.
+
+    Therefore:
+
+        0/25
+          ↓
+        3/25  → ALERT
+          ↓
+        5/25  → NO ALERT
+          ↓
+        0/25  → RESET
+          ↓
+        4/25  → ALERT AGAIN
     """
 
     key = reward_key(reward)
 
-    current_available = bool(
-        reward["available"]
+    previous = state.get(
+        key,
+        False,
     )
 
-    old_available = bool(
-        state.get(key, False)
-    )
+    current = reward["available"]
 
     print(
         f"{reward['amount']} | "
         f"{reward['current']}/{reward['total']} | "
-        f"available={current_available} | "
-        f"previous={old_available}"
+        f"available={current} | "
+        f"previous={previous}"
     )
 
-    sent = False
+    if current and not previous:
 
-    # --------------------------------------------------------
-    # NEW REFILL
-    # --------------------------------------------------------
-
-    if (
-        current_available
-        and not old_available
-    ):
         print(
             f"NEW REFILL DETECTED: "
             f"{reward['amount']} "
@@ -440,129 +393,26 @@ def process_reward(
             f"{reward['total']}"
         )
 
-        sent = telegram(
-            build_alert_message(
-                reward
-            )
+        send_telegram(
+            alert_message(reward)
         )
 
-    # --------------------------------------------------------
-    # UPDATE STATE
-    # --------------------------------------------------------
-
-    state[key] = current_available
-
-    return sent
+    state[key] = current
 
 
 # ============================================================
-# MANUAL CHECK
-# ============================================================
-
-def manual_check(
-    values: list[str],
-) -> int:
-    """
-    Manually provide reward values.
-
-    Example:
-
-        python monitor.py --check \
-            "$2=0/25" \
-            "$5=0/10" \
-            "$10=0/5"
-
-    """
-
-    state = load_state()
-
-    print("")
-    print("========== REWARD CHECK ==========")
-
-    processed_keys = set()
-
-    for value in values:
-
-        if "=" not in value:
-            print(
-                f"Invalid value: {value}"
-            )
-            continue
-
-        amount_text, stock = (
-            value.split("=", 1)
-        )
-
-        try:
-
-            reward = create_reward(
-                amount_text,
-                stock,
-            )
-
-        except ValueError as exc:
-
-            print(
-                f"Ignored {value}: {exc}"
-            )
-
-            continue
-
-        key = reward_key(reward)
-
-        processed_keys.add(key)
-
-        process_reward(
-            reward,
-            state,
-        )
-
-    # --------------------------------------------------------
-    # Missing rewards are considered unavailable.
-    # This allows a later refill to trigger again.
-    # --------------------------------------------------------
-
-    for key in list(state.keys()):
-
-        if key not in processed_keys:
-
-            state[key] = False
-
-    save_state(state)
-
-    print("===================================")
-    print("")
-    print(
-        f"State saved to: {STATE_FILE}"
-    )
-
-    return 0
-
-
-# ============================================================
-# TEST SCENARIO
+# LOCAL TEST
 # ============================================================
 
 def run_test() -> int:
-    """
-    Run a complete local test.
-
-    This does NOT access PlayToEarn.
-
-    It tests:
-
-        0 → positive
-        positive → positive
-        positive → 0
-        0 → positive again
-    """
 
     print("")
     print("===================================")
     print(" REWARD MONITOR LOCAL TEST")
     print("===================================")
 
-    state = {}
+    # Start with everything unavailable.
+    state: dict[str, bool] = {}
 
     scenarios = [
         {
@@ -592,21 +442,19 @@ def run_test() -> int:
         },
     ]
 
-    for index, scenario in enumerate(
+    for number, scenario in enumerate(
         scenarios,
         start=1,
     ):
 
         print("")
-        print(
-            f"TEST {index}"
-        )
+        print(f"TEST {number}")
 
         for amount, stock in scenario.items():
 
             try:
 
-                reward = create_reward(
+                reward = make_reward(
                     amount,
                     stock,
                 )
@@ -619,8 +467,7 @@ def run_test() -> int:
             except ValueError as exc:
 
                 print(
-                    f"{amount} ignored: "
-                    f"{exc}"
+                    f"{amount} ignored: {exc}"
                 )
 
     print("")
@@ -644,18 +491,14 @@ def run_test() -> int:
 # TELEGRAM TEST
 # ============================================================
 
-def telegram_test() -> int:
-    """
-    Send a Telegram test message.
-    """
+def test_telegram() -> int:
 
-    ok = telegram(
+    success = send_telegram(
         "✅ Solana reward monitor "
-        "Telegram test succeeded.\n\n"
-        "The bot can send refill alerts."
+        "Telegram test succeeded."
     )
 
-    return 0 if ok else 1
+    return 0 if success else 1
 
 
 # ============================================================
@@ -663,9 +506,6 @@ def telegram_test() -> int:
 # ============================================================
 
 def show_status() -> int:
-    """
-    Show current stored reward state.
-    """
 
     state = load_state()
 
@@ -673,8 +513,9 @@ def show_status() -> int:
     print("========== CURRENT STATE ==========")
 
     if not state:
+
         print(
-            "No reward state has been recorded yet."
+            "No saved reward state."
         )
 
     else:
@@ -692,6 +533,76 @@ def show_status() -> int:
 
 
 # ============================================================
+# MANUAL CHECK
+# ============================================================
+
+def manual_check(
+    values: list[str],
+) -> int:
+
+    state = load_state()
+
+    print("")
+    print("========== MANUAL CHECK ==========")
+
+    processed = set()
+
+    for value in values:
+
+        if "=" not in value:
+
+            print(
+                f"Invalid input: {value}"
+            )
+
+            continue
+
+        amount, stock = (
+            value.split("=", 1)
+        )
+
+        try:
+
+            reward = make_reward(
+                amount,
+                stock,
+            )
+
+        except ValueError as exc:
+
+            print(
+                f"Ignored {value}: {exc}"
+            )
+
+            continue
+
+        key = reward_key(reward)
+
+        processed.add(key)
+
+        process_reward(
+            reward,
+            state,
+        )
+
+    # Anything not supplied in this check
+    # is considered unavailable.
+    for key in list(state.keys()):
+
+        if key not in processed:
+            state[key] = False
+
+    save_state(state)
+
+    print("==================================")
+    print(
+        f"State saved to {STATE_FILE}"
+    )
+
+    return 0
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
@@ -699,33 +610,27 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Personal Solana reward "
-            "availability notifier."
+            "Solana reward availability detector "
+            "and Telegram notifier."
         )
-    )
-
-    parser.add_argument(
-        "--test-telegram",
-        action="store_true",
-        help=(
-            "Send a Telegram test message."
-        ),
     )
 
     parser.add_argument(
         "--test",
         action="store_true",
-        help=(
-            "Run the local reward detector test."
-        ),
+        help="Run the local detector test.",
+    )
+
+    parser.add_argument(
+        "--test-telegram",
+        action="store_true",
+        help="Send a Telegram test.",
     )
 
     parser.add_argument(
         "--status",
         action="store_true",
-        help=(
-            "Show the current saved reward state."
-        ),
+        help="Show saved reward state.",
     )
 
     parser.add_argument(
@@ -733,19 +638,19 @@ def main() -> int:
         nargs="+",
         metavar="REWARD",
         help=(
-            "Check manually supplied rewards. "
-            "Example: "
-            '--check "$2=0/25" "$5=0/10" "$10=0/5"'
+            "Check reward values. "
+            'Example: --check "$2=0/25" '
+            '"$5=0/10" "$10=0/5"'
         ),
     )
 
     args = parser.parse_args()
 
-    if args.test_telegram:
-        return telegram_test()
-
     if args.test:
         return run_test()
+
+    if args.test_telegram:
+        return test_telegram()
 
     if args.status:
         return show_status()
